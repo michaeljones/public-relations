@@ -99,24 +99,32 @@ fn main() -> anyhow::Result<()> {
         diff.foreach(
             &mut |_, _| true,
             None,
-            None,
-            Some(&mut |diff_delta, _, diff_line| {
+            Some(&mut |diff_delta, diff_hunk| {
                 if let Some(path) = diff_delta.old_file().path() {
-                    if let Some(line) = diff_line.old_lineno() {
+                    if diff_hunk.old_lines() != 0 {
                         let path = path.to_path_buf();
+
+                        let start = diff_hunk.old_start();
+                        let line_count = diff_hunk.old_lines();
+                        let mut old_lines: Vec<u32> =
+                            (start..(start + line_count)).into_iter().collect();
 
                         file_line_map
                             .entry(path)
-                            .and_modify(|lines| lines.push(line))
-                            .or_insert_with(|| vec![line]);
+                            .and_modify(|lines| lines.append(&mut old_lines))
+                            .or_insert_with(|| old_lines);
                     }
                 }
                 true
             }),
+            None,
         )?;
 
         pr_lines_lookup.insert(pr.number, file_line_map);
+        break;
     }
+
+    println!("{pr_lines_lookup:?}");
 
     Ok(())
 }
