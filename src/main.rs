@@ -3,10 +3,14 @@
 ///!   gh pr list --limit 500 --json baseRefName --json headRefName --json headRefOid --json headRepository --json headRepositoryOwner --json number --json id > prs.json
 ///!
 ///! With problematic entries manually deleted (one with null as the repo due to the fork being deleted)
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
 use serde::Deserialize;
+use walkdir::{DirEntry, WalkDir};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +37,8 @@ struct Repo {
 struct User {
     login: String,
 }
+
+type LineLookup = HashMap<PathBuf, Vec<u32>>;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
@@ -75,8 +81,6 @@ fn main() -> anyhow::Result<()> {
             fetch_pull_request_branch(&repo_path, user, repo_name, from_branch, &to_branch)?;
         }
     }
-
-    type LineLookup = HashMap<PathBuf, Vec<u32>>;
 
     println!("Calculating diffs...");
 
@@ -137,9 +141,98 @@ fn main() -> anyhow::Result<()> {
         pr_lines_lookup.insert(pr.number, file_line_map);
     }
 
-    println!("{pr_lines_lookup:?}");
+    let html = generate_html(&repo_path, &pr_lines_lookup)?;
+    std::fs::write("prmap.html", html)?;
 
     Ok(())
+}
+
+fn is_hidden(entry: &DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_str()
+        .map(|s| s.starts_with("."))
+        .unwrap_or(false)
+}
+
+fn generate_html(
+    repo_path: &Path,
+    pr_lines_lookup: &HashMap<u32, LineLookup>,
+) -> anyhow::Result<String> {
+    let walker = WalkDir::new(repo_path).sort_by_file_name().into_iter();
+    let walker = walker
+        .filter_entry(|e| !is_hidden(e))
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            if entry.file_type().is_dir() {
+                None
+            } else {
+                entry
+                    .path()
+                    .strip_prefix(repo_path)
+                    .ok()
+                    .map(|path| path.to_path_buf())
+            }
+        });
+
+    let markup = maud::html! {
+        (maud::DOCTYPE)
+        html {
+            head {
+                meta charset="utf-8";
+                title { }
+                style {
+                    (maud::PreEscaped(r#"
+html {
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+
+}
+                    "#))
+                }
+            }
+            body {
+                h1 { "Public Relations" }
+                ul {
+                    @for entry in walker {
+                        (file_list_entry(&entry, pr_lines_lookup))
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(markup.into_string())
+}
+
+fn file_list_entry(entry: &Path, pr_lines_lookup: &HashMap<u32, LineLookup>) -> maud::Markup {
+    let total_pr_count = pr_lines_lookup.len();
+
+    let in_pr_count: u32 = pr_lines_lookup
+        .iter()
+        .map(|(_, value)| value.contains_key(entry) as u32)
+        .sum();
+
+    let fraction: f64 = 1.0 - (in_pr_count as f64 / total_pr_count as f64);
+    let gradient = colorgrad::spectral();
+    let (min, max) = gradient.domain();
+    let color = gradient.at(min + fraction * (max - min));
+    let style = format!(
+        "width: 4rem; height: 1rem; background-color: rgb({}, {}, {})",
+        color.r * 255.0,
+        color.g * 255.0,
+        color.b * 255.0
+    );
+
+    let li_style = "display: flex; gap: 1rem;";
+
+    maud::html! {
+        li style=(li_style) {
+            div style=(style) {
+            }
+            (entry.display().to_string())
+        }
+    }
 }
 
 fn fetch_pull_request_branch(
