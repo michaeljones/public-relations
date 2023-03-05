@@ -59,7 +59,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("Fetching pull requests...");
 
-    for pull_request in data.iter().take(100) {
+    for pull_request in data.iter() {
         let user = &pull_request.head_repository_owner.login;
         let repo_name = &pull_request.head_repository.name;
         let from_branch = &pull_request.head_ref_name;
@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
     // Skip files like Cargo.lock where the conflicts are not meaningful
     let ignore_files = [PathBuf::from("Cargo.lock")];
 
-    for pr in data.iter().take(100) {
+    for pr in data.iter() {
         let branch_head_oid = git2::Oid::from_str(&pr.head_ref_oid)?;
         let branch_head_commit = repo.find_commit(branch_head_oid)?;
         let branch_head_tree = branch_head_commit.tree()?;
