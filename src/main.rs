@@ -4,7 +4,7 @@
 ///!
 ///! With problematic entries manually deleted (one with null as the repo due to the fork being deleted)
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 
@@ -141,7 +141,9 @@ fn main() -> anyhow::Result<()> {
         pr_lines_lookup.insert(pr.number, file_line_map);
     }
 
-    let html = generate_html(&repo_path, &pr_lines_lookup)?;
+    let per_file_usage = generate_file_usage(&repo_path, &pr_lines_lookup);
+
+    let html = generate_html(per_file_usage)?;
     std::fs::write("prmap.html", html)?;
 
     Ok(())
@@ -155,12 +157,13 @@ fn is_hidden(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-fn generate_html(
-    repo_path: &Path,
+fn generate_file_usage(
+    repo_path: &PathBuf,
     pr_lines_lookup: &HashMap<u32, LineLookup>,
-) -> anyhow::Result<String> {
-    let walker = WalkDir::new(repo_path).sort_by_file_name().into_iter();
-    let walker = walker
+) -> BTreeMap<PathBuf, u32> {
+    let walker = WalkDir::new(repo_path)
+        .sort_by_file_name()
+        .into_iter()
         .filter_entry(|e| !is_hidden(e))
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -176,6 +179,27 @@ fn generate_html(
             }
         });
 
+    let mut file_usage = BTreeMap::<PathBuf, u32>::new();
+
+    for path in walker {
+        let in_pr_count: u32 = pr_lines_lookup
+            .iter()
+            .map(|(_, value)| value.contains_key(&path) as u32)
+            .sum();
+
+        file_usage.insert(path, in_pr_count);
+    }
+
+    file_usage
+}
+
+fn generate_html(file_usage: BTreeMap<PathBuf, u32>) -> anyhow::Result<String> {
+    let max_count = file_usage
+        .iter()
+        .map(|(_, value)| value)
+        .max()
+        .context("Failed to find max count")?;
+
     let markup = maud::html! {
         (maud::DOCTYPE)
         html {
@@ -188,14 +212,18 @@ html {
     font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 
 }
+
+body {
+    padding: 1rem 2rem;
+}
                     "#))
                 }
             }
             body {
                 h1 { "Public Relations" }
                 ul {
-                    @for entry in walker {
-                        (file_list_entry(&entry, pr_lines_lookup))
+                    @for (path, count) in file_usage.iter() {
+                        (file_list_entry(&path, *count, *max_count))
                     }
                 }
             }
@@ -205,15 +233,8 @@ html {
     Ok(markup.into_string())
 }
 
-fn file_list_entry(entry: &Path, pr_lines_lookup: &HashMap<u32, LineLookup>) -> maud::Markup {
-    let total_pr_count = pr_lines_lookup.len();
-
-    let in_pr_count: u32 = pr_lines_lookup
-        .iter()
-        .map(|(_, value)| value.contains_key(entry) as u32)
-        .sum();
-
-    let fraction: f64 = 1.0 - (in_pr_count as f64 / total_pr_count as f64);
+fn file_list_entry(entry: &Path, count: u32, max_count: u32) -> maud::Markup {
+    let fraction: f64 = 1.0 - (count as f64 / max_count as f64);
     let gradient = colorgrad::spectral();
     let (min, max) = gradient.domain();
     let color = gradient.at(min + fraction * (max - min));
@@ -224,7 +245,7 @@ fn file_list_entry(entry: &Path, pr_lines_lookup: &HashMap<u32, LineLookup>) -> 
         color.b * 255.0
     );
 
-    let li_style = "display: flex; gap: 1rem;";
+    let li_style = "display: flex; gap: 1rem; padding: 0.1rem 0rem;";
 
     maud::html! {
         li style=(li_style) {
