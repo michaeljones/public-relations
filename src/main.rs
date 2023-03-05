@@ -46,40 +46,46 @@ fn main() -> anyhow::Result<()> {
             .context("Usage: cargo run <repo path> <json path>")?,
     );
 
-    println!("{}", json_path.display());
+    let repo = git2::Repository::open(&repo_path)?;
 
     let json_string = std::fs::read_to_string(&json_path)?;
     let data: Vec<PullRequest> = serde_json::from_str(&json_string)?;
 
-    for pull_request in data.iter() {
+    println!("Fetching pull requests...");
+
+    for pull_request in data.iter().take(100) {
         let user = &pull_request.head_repository_owner.login;
-        let repo = &pull_request.head_repository.name;
+        let repo_name = &pull_request.head_repository.name;
         let from_branch = &pull_request.head_ref_name;
         let to_branch = format!("pull-request-{}", pull_request.number);
 
-        // git fetch git@github.com:cessen/helix set_tab_width:pull-request-561
-        let origin = format!("git@github.com:{user}/{repo}");
-        let from_to = format!("{from_branch}:{to_branch}");
+        if let Ok(pr_branch) = repo.find_branch(&to_branch, git2::BranchType::Local) {
+            let pr_branch_oid = pr_branch
+                .get()
+                .peel_to_commit()
+                .context("Cannot find commit for pull request branch")?
+                .id();
+            let target_oid = git2::Oid::from_str(&pull_request.head_ref_oid)?;
 
-        let output = std::process::Command::new("git")
-            .args(["fetch", &origin, &from_to])
-            .current_dir(&repo_path)
-            .output()?;
-
-        if !output.status.success() {
-            eprintln!("Failed to run git fetch for {origin} {from_to}");
+            // Only run get fetch if the local oid doesn't match the target oid from the json
+            if pr_branch_oid != target_oid {
+                fetch_pull_request_branch(&repo_path, user, repo_name, from_branch, &to_branch)?;
+            }
+        } else {
+            fetch_pull_request_branch(&repo_path, user, repo_name, from_branch, &to_branch)?;
         }
-
-        break;
     }
-
-    let repo = git2::Repository::open(&repo_path)?;
 
     type LineLookup = HashMap<PathBuf, Vec<u32>>;
 
+    println!("Calculating diffs...");
+
     let mut pr_lines_lookup = HashMap::<u32, LineLookup>::new();
 
-    for pr in data.iter() {
+    // Skip files like Cargo.lock where the conflicts are not meaningful
+    let ignore_files = [PathBuf::from("Cargo.lock")];
+
+    for pr in data.iter().take(100) {
         let branch_head_oid = git2::Oid::from_str(&pr.head_ref_oid)?;
         let branch_head_commit = repo.find_commit(branch_head_oid)?;
         let branch_head_tree = branch_head_commit.tree()?;
@@ -104,6 +110,14 @@ fn main() -> anyhow::Result<()> {
                     if diff_hunk.old_lines() != 0 {
                         let path = path.to_path_buf();
 
+                        if ignore_files.contains(&path) {
+                            return true;
+                        }
+
+                        // Record all the lines from the old side of the diff which means we record context lines as
+                        // well. ie. lines that haven't actually changed. This might be ok as it'll give us an idea
+                        // when PRs impact code that is very close to each other but we might also want to try to
+                        // improve it in the future
                         let start = diff_hunk.old_start();
                         let line_count = diff_hunk.old_lines();
                         let mut old_lines: Vec<u32> =
@@ -121,10 +135,32 @@ fn main() -> anyhow::Result<()> {
         )?;
 
         pr_lines_lookup.insert(pr.number, file_line_map);
-        break;
     }
 
     println!("{pr_lines_lookup:?}");
+
+    Ok(())
+}
+
+fn fetch_pull_request_branch(
+    repo_path: &PathBuf,
+    user: &str,
+    repo_name: &str,
+    from_branch: &str,
+    to_branch: &str,
+) -> anyhow::Result<()> {
+    let origin = format!("git@github.com:{user}/{repo_name}");
+    let from_to = format!("{from_branch}:{to_branch}");
+
+    println!("Running git fetch {origin} {from_to}");
+    let output = std::process::Command::new("git")
+        .args(["fetch", &origin, &from_to])
+        .current_dir(repo_path)
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!("Failed to run git fetch for {origin} {from_to}");
+    }
 
     Ok(())
 }
